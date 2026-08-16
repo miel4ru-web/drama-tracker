@@ -309,6 +309,10 @@
   <div class="sync-row">
     <span class="sync-pill" id="syncPill"><span class="dot"></span><span id="syncLabel">Starting…</span></span>
     <span class="sync-note" id="syncNote"></span>
+    <button class="btn ghost" id="syncSettingsBtn" style="margin-left:auto;" title="GitHub sync settings">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      Sync
+    </button>
   </div>
 
   <div class="toolbar">
@@ -316,7 +320,7 @@
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
       <input type="text" id="searchInput" placeholder="Search title, genre…" aria-label="Search">
     </div>
-    <button class="btn ghost" id="refreshBtn" title="Pull latest from Drive">
+    <button class="btn ghost" id="refreshBtn" title="Pull latest from GitHub">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 4v6h-6"/></svg>
       Refresh
     </button>
@@ -399,7 +403,8 @@
 (function(){
   "use strict";
 
-  var FILE_TITLE = "drama-tracker-data.json";
+  var GIST_FILENAME = "drama-tracker-data.json";
+  var GH_API = "https://api.github.com";
   var SORT_FIELDS = [
     {key:"title", label:"Title"},
     {key:"mediaType", label:"Type"},
@@ -411,10 +416,7 @@
 
   var state = {
     entries: [],
-    driveFileId: null,
-    driveServer: null,
-    mcp: null,
-    mode: "init", // init | drive | local | unavailable
+    mode: "init", // init | github | local
     search: "",
     groupState: {}, // mediaType -> {collapsed, sortKey, sortDir}
     saving: false,
@@ -427,12 +429,6 @@
     return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){
       return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
     });
-  }
-  function b64ToUtf8(b64){
-    var binary = atob(b64);
-    var bytes = new Uint8Array(binary.length);
-    for (var i=0;i<binary.length;i++) bytes[i] = binary.charCodeAt(i);
-    return new TextDecoder("utf-8").decode(bytes);
   }
   function fmtDate(d){
     if (!d) return "—";
@@ -465,139 +461,197 @@
     if (note) noteEl.appendChild(note);
   }
   function noteText(s){ var span=document.createElement("span"); span.textContent=s; return span; }
-  function noteRetry(s, fn){
+  function noteRetry(s, fn, label){
     var span = document.createElement("span");
     span.textContent = s + " ";
     var btn = document.createElement("button");
-    btn.textContent = "Retry";
+    btn.textContent = label || "Retry";
     btn.onclick = fn;
     span.appendChild(btn);
     return span;
   }
 
-  // ---------- Drive persistence ----------
-  var drive = {
-    async init(){
-      if (!window.claude || typeof window.claude.use !== "function"){
-        state.mode = "unavailable";
+  // ---------- token storage ----------
+  function getToken(){ try{ return localStorage.getItem("watchlog:ghtoken"); }catch(e){ return null; } }
+  function setToken(t){ try{ t ? localStorage.setItem("watchlog:ghtoken", t) : localStorage.removeItem("watchlog:ghtoken"); }catch(e){} }
+  function getGistId(){ try{ return localStorage.getItem("watchlog:gistid"); }catch(e){ return null; } }
+  function setGistId(id){ try{ id ? localStorage.setItem("watchlog:gistid", id) : localStorage.removeItem("watchlog:gistid"); }catch(e){} }
+
+  // ---------- GitHub Gist persistence ----------
+  var sync = {
+    init(){
+      if (!getToken()){
+        state.mode = "local";
         return false;
       }
-      try{
-        state.mcp = await window.claude.use("mcp");
-      }catch(e){ state.mcp = null; }
-      if (!state.mcp){
-        state.mode = "unavailable";
-        return false;
+      state.mode = "github";
+      return true;
+    },
+
+    async ghFetch(path, options){
+      options = options || {};
+      var headers = Object.assign({
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Authorization": "token " + getToken()
+      }, options.headers || {});
+      var res = await fetch(GH_API + path, Object.assign({}, options, {headers: headers}));
+      if (!res.ok){
+        var body = null;
+        try{ body = await res.json(); }catch(e){}
+        var err = new Error((body && body.message) || ("GitHub API error " + res.status));
+        err.status = res.status;
+        throw err;
       }
-      try{
-        var listed = await state.mcp.listTools();
-        var server = (listed.servers || []).find(function(s){
-          return (s.tools||[]).some(function(t){ return t.name === "create_file"; });
-        });
-        if (!server || server.tools.length === 0){
-          state.mode = "unavailable";
-          return false;
-        }
-        state.driveServer = server.server;
-        state.mode = "drive";
-        return true;
-      }catch(e){
-        state.mode = "unavailable";
-        return false;
+      if (res.status === 204) return null;
+      return res.json();
+    },
+
+    async findGist(){
+      for (var page=1; page<=5; page++){
+        var list = await sync.ghFetch("/gists?per_page=100&page=" + page);
+        if (!list || !list.length) break;
+        var hit = list.find(function(g){ return g.files && g.files[GIST_FILENAME]; });
+        if (hit) return hit.id;
+        if (list.length < 100) break;
       }
+      return null;
     },
 
     async load(){
       setSync("", "Loading…", null, true);
       try{
-        var res = await state.mcp.callTool(state.driveServer, "search_files", {
-          query: "title = '" + FILE_TITLE + "'"
-        }, {cache:false});
-        var files = (res.payload && res.payload.files) || [];
-        if (files.length === 0){
+        var id = getGistId();
+        if (!id){
+          id = await sync.findGist();
+          if (id) setGistId(id);
+        }
+        if (!id){
           state.entries = localLoad() || [];
-          state.driveFileId = null;
           setSync("ok", "Synced", noteText("First time here — add a title to start."), false);
           return;
         }
-        files.sort(function(a,b){ return new Date(b.createdTime) - new Date(a.createdTime); });
-        var newest = files[0];
-        state.driveFileId = newest.id;
-
-        var dl = await state.mcp.callTool(state.driveServer, "download_file_content", {
-          fileId: newest.id
-        }, {cache:false});
-        var json = b64ToUtf8(dl.payload.content);
-        state.entries = JSON.parse(json);
+        var gist = await sync.ghFetch("/gists/" + id);
+        var file = gist.files[GIST_FILENAME];
+        var content = file.truncated ? await (await fetch(file.raw_url)).text() : file.content;
+        state.entries = JSON.parse(content || "[]");
         localSave();
         setSync("ok", "Synced", null, false);
-
-        // best-effort cleanup of stray older copies
-        for (var i=1;i<files.length;i++){
-          state.mcp.callTool(state.driveServer, "trash_file", {fileId: files[i].id}, {cache:false}).catch(function(){});
-        }
       }catch(err){
-        drive.handleError(err, "load");
+        sync.handleError(err, "load");
         state.entries = localLoad() || state.entries || [];
       }
     },
 
     async save(){
-      if (state.mode !== "drive"){ localSave(); return; }
+      if (state.mode !== "github"){ localSave(); return; }
       if (state.saving){ state.pendingSave = true; return; }
       state.saving = true;
       setSync("warn", "Saving…", null, true);
-      var prevFileId = state.driveFileId;
       try{
-        var res = await state.mcp.callTool(state.driveServer, "create_file", {
-          title: FILE_TITLE,
-          textContent: JSON.stringify(state.entries),
-          contentMimeType: "application/json",
-          disableConversionToGoogleType: true
-        }, {cache:false});
-        state.driveFileId = res.payload.id;
+        var id = getGistId();
+        var body = {files: {}};
+        body.files[GIST_FILENAME] = {content: JSON.stringify(state.entries)};
+        var result;
+        if (id){
+          result = await sync.ghFetch("/gists/" + id, {method:"PATCH", body: JSON.stringify(body)});
+        } else {
+          body.description = "Watch Log data (auto-synced by the app — don't rename the file)";
+          body.public = false;
+          result = await sync.ghFetch("/gists", {method:"POST", body: JSON.stringify(body)});
+          setGistId(result.id);
+        }
         localSave();
         setSync("ok", "Synced", null, false);
-        if (prevFileId){
-          state.mcp.callTool(state.driveServer, "trash_file", {fileId: prevFileId}, {cache:false}).catch(function(){});
-        }
       }catch(err){
-        drive.handleError(err, "save");
+        sync.handleError(err, "save");
         localSave();
       }finally{
         state.saving = false;
         if (state.pendingSave){
           state.pendingSave = false;
-          drive.save();
+          sync.save();
         }
       }
     },
 
     handleError(err, ctx){
-      var code = err && err.code;
-      switch(code){
-        case "needs_reauth":
-          setSync("err", "Reconnect needed", noteText("Reconnect Google Drive in claude.ai Settings → Connectors."), false);
-          break;
-        case "server_not_connected":
-        case "selection_required":
-          setSync("err", "Drive not connected", noteText("Add Google Drive in claude.ai Settings → Connectors."), false);
-          break;
-        case "server_unavailable":
-        case "upstream_error":
-          setSync("warn", ctx === "save" ? "Save didn't confirm" : "Couldn't reach Drive", noteRetry("Working from the local copy on this device.", function(){
-            ctx === "save" ? drive.save() : drive.load();
-          }), false);
-          break;
-        case "blocked_by_policy":
-        case "approval_required":
-          setSync("err", "Sync blocked", noteText("Drive access is blocked by policy for this view."), false);
-          break;
-        default:
-          setSync("err", "Sync error", noteText((err && err.message) || "Something went wrong talking to Drive."), false);
+      var status = err && err.status;
+      if (status === 401){
+        setSync("err", "Reconnect needed", noteRetry("Token is invalid or expired.", openSyncModal, "Reconnect"), false);
+      } else if (status === 404){
+        setGistId(null);
+        setSync("warn", ctx === "save" ? "Save didn't confirm" : "Couldn't find sync file", noteRetry("Working from the local copy on this device.", function(){
+          ctx === "save" ? sync.save() : sync.load();
+        }), false);
+      } else if (status === 403){
+        setSync("err", "Rate limited", noteText("GitHub API rate limit hit — try again shortly."), false);
+      } else {
+        setSync("warn", ctx === "save" ? "Save didn't confirm" : "Couldn't reach GitHub", noteRetry("Working from the local copy on this device.", function(){
+          ctx === "save" ? sync.save() : sync.load();
+        }), false);
       }
     }
   };
+
+  // ---------- sync settings modal ----------
+  function openSyncModal(){
+    var hasToken = !!getToken();
+    var overlay = document.createElement("div");
+    overlay.className = "overlay";
+    overlay.innerHTML =
+      '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="syncModalTitle">' +
+        '<h2 id="syncModalTitle">GitHub sync</h2>' +
+        '<div class="field">' +
+          '<label for="gh-token">Personal access token</label>' +
+          '<input type="password" id="gh-token" autocomplete="off" placeholder="' + (hasToken ? "Enter a new token to replace the saved one" : "ghp_…") + '">' +
+        '</div>' +
+        '<p style="font-size:12.5px;color:var(--text-muted);margin:-4px 0 14px;">' +
+          'Needs only the <code>gist</code> scope. ' +
+          '<a href="https://github.com/settings/tokens/new?scopes=gist&description=Watch+Log+sync" target="_blank" rel="noopener" style="color:var(--accent);">Create one on GitHub</a> — stored only in this browser, never committed to the repo.' +
+        '</p>' +
+        '<div class="modal-actions">' +
+          '<button type="button" class="btn danger ghost" id="ghDisconnectBtn" style="' + (hasToken ? "" : "display:none;") + '">Disconnect</button>' +
+          '<div class="right">' +
+            '<button type="button" class="btn ghost" id="ghCancelBtn">Cancel</button>' +
+            '<button type="button" class="btn primary" id="ghConnectBtn">' + (hasToken ? "Save" : "Connect") + '</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    function close(){ overlay.remove(); }
+    overlay.addEventListener("click", function(ev){ if (ev.target === overlay) close(); });
+    document.addEventListener("keydown", function esc(ev){
+      if (ev.key === "Escape"){ close(); document.removeEventListener("keydown", esc); }
+    });
+    overlay.querySelector("#ghCancelBtn").addEventListener("click", close);
+
+    overlay.querySelector("#ghDisconnectBtn").addEventListener("click", function(){
+      setToken(null);
+      setGistId(null);
+      state.mode = "local";
+      close();
+      setSync("warn", "Local only", noteRetry("Connect GitHub to sync across devices.", openSyncModal, "Connect"), false);
+      toast("Disconnected");
+    });
+
+    overlay.querySelector("#ghConnectBtn").addEventListener("click", function(){
+      var val = document.getElementById("gh-token").value.trim();
+      if (!val){
+        if (hasToken){ close(); return; }
+        toast("Enter a token first");
+        return;
+      }
+      setToken(val);
+      close();
+      sync.init();
+      sync.load().then(render);
+      toast("Connecting…");
+    });
+
+    setTimeout(function(){ document.getElementById("gh-token").focus(); }, 0);
+  }
 
   // ---------- rendering ----------
   function filtered(){
@@ -827,7 +881,7 @@
           e.watchedDate = new Date().toISOString().slice(0,10);
         }
         render();
-        drive.save();
+        sync.save();
       }
     } else if (action === "edit"){
       var id2 = rowEl.getAttribute("data-id");
@@ -841,7 +895,8 @@
     render();
   });
   document.getElementById("addBtn").addEventListener("click", function(){ openModal(null); });
-  document.getElementById("refreshBtn").addEventListener("click", function(){ drive.load().then(render); });
+  document.getElementById("refreshBtn").addEventListener("click", function(){ sync.load().then(render); });
+  document.getElementById("syncSettingsBtn").addEventListener("click", openSyncModal);
 
   // ---------- modal ----------
   function openModal(entry){
@@ -878,7 +933,7 @@
       state.entries = state.entries.filter(function(e){return e.id !== entry.id;});
       close();
       render();
-      drive.save();
+      sync.save();
       toast("Deleted");
     });
 
@@ -901,7 +956,7 @@
       }
       close();
       render();
-      drive.save();
+      sync.save();
       toast(isEdit ? "Saved" : "Added");
     });
 
@@ -910,12 +965,12 @@
 
   // ---------- boot ----------
   (async function boot(){
-    var ok = await drive.init();
+    var ok = sync.init();
     if (ok){
-      await drive.load();
+      await sync.load();
     } else {
       state.entries = localLoad() || [];
-      setSync("warn", "Local only", noteText("Cloud sync isn't available in this view — changes stay on this device."), false);
+      setSync("warn", "Local only", noteRetry("Connect GitHub to sync across devices.", openSyncModal, "Connect"), false);
     }
     render();
   })();
