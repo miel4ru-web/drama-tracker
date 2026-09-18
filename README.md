@@ -9,11 +9,15 @@
 
 ## 기능
 
-- 제목 / 타입(Drama·Movie·Anime·Documentary·Variety Show·Web Series) / 장르(14종) / 시청일 / 노트 기록
+- 제목 / 타입(Drama·Movie·Anime·Documentary·Variety Show·Web Series) / 장르(14종) / 노트 기록
+- **시청 상태 4단계** — 볼 예정 · 보는 중 · 완료 · 중단. 행의 칩을 누르면 순환하고,
+  보는 중으로 바꾸면 시작일이, 완료로 바꾸면 종료일이 자동으로 채워집니다
+- **에피소드 진행률** — 12/16 처럼 본 화수와 전체 화수를 기록하면 행에 막대로 표시
+- 시작일 · 종료일 각각 기록
 - 0–10 반별(half-star) 평점 — 클릭, 또는 방향키·Home·End 로 입력
-- 타입별 그룹, 그룹마다 접기 + 정렬 기준·방향 선택
+- 타입별 그룹, 그룹마다 접기 + 정렬 기준·방향 선택 (상태 정렬은 진행 순서를 따릅니다)
 - 제목·장르·타입 검색
-- Watched / Total / 평균 평점 요약
+- Watching · Done · Total · 평균 평점 요약
 - 라이트·다크 테마 자동 전환
 - localStorage 저장 + 선택적 GitHub Gist 동기화
 - JSON 백업 내보내기/가져오기

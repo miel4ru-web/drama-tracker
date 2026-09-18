@@ -98,7 +98,7 @@
     margin:0;color:var(--text-muted);font-size:13px;
   }
   .stats{
-    display:flex;gap:16px;font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+    display:flex;flex-wrap:wrap;gap:12px 16px;font-family:var(--font-mono);font-variant-numeric:tabular-nums;
   }
   .stat{text-align:right;}
   .stat b{display:block;font-size:19px;color:var(--text);}
@@ -200,16 +200,28 @@
     position:relative;
   }
   .row:first-child{border-top:none;}
-  .row.watched{background:color-mix(in srgb, var(--accent-soft) 55%, transparent);}
+  .row.st-done{background:color-mix(in srgb, var(--accent-soft) 55%, transparent);}
+  .row.st-dropped .info .title{text-decoration:line-through;text-decoration-color:var(--border-strong);}
 
-  .check{
-    width:22px;height:22px;border-radius:6px;border:1.6px solid var(--border-strong);
-    background:var(--surface);cursor:pointer;display:flex;align-items:center;justify-content:center;flex:none;
-    color:var(--accent-ink);
+  .status-btn{
+    height:24px;border-radius:999px;border:1.6px solid var(--border-strong);background:var(--surface);
+    cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;flex:none;
+    padding:0 10px;min-width:92px;font-size:11.5px;font-weight:700;color:var(--text-muted);
   }
-  .check svg{opacity:0;width:14px;height:14px;}
-  .row.watched .check{background:var(--accent);border-color:var(--accent);}
-  .row.watched .check svg{opacity:1;}
+  .status-btn .dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none;}
+  .row.st-watching .status-btn{color:var(--accent);border-color:var(--accent);background:var(--accent-soft);}
+  .row.st-done .status-btn{color:var(--accent-ink);background:var(--accent);border-color:var(--accent);}
+  .row.st-dropped .status-btn{color:var(--danger);border-color:var(--danger);background:var(--danger-soft);}
+
+  .progress{
+    display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-muted);
+    font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+  }
+  .progress .bar{
+    width:46px;height:5px;border-radius:999px;background:var(--surface-alt);
+    border:1px solid var(--border);overflow:hidden;
+  }
+  .progress .bar i{display:block;height:100%;background:var(--accent);}
 
   .info{min-width:0;}
   .info .title{font-weight:700;font-size:14.5px;overflow-wrap:anywhere;}
@@ -283,6 +295,8 @@
   .star-picker .star.half .fg svg{clip-path:inset(0 50% 0 0);}
   .star-picker .star.full .fg svg{clip-path:inset(0 0 0 0);}
   .field-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+  .ep-inputs{display:flex;align-items:center;gap:6px;}
+  .ep-inputs span{color:var(--text-muted);font-size:13px;}
   .modal-actions{display:flex;justify-content:space-between;gap:10px;margin-top:18px;}
   .modal-actions .right{display:flex;gap:8px;}
   .backup{display:flex;align-items:center;gap:8px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border);}
@@ -305,7 +319,8 @@
       <p>Dramas &amp; movies, checked off as you go.</p>
     </div>
     <div class="stats">
-      <div class="stat"><b id="statWatched">0</b><span>Watched</span></div>
+      <div class="stat"><b id="statWatching">0</b><span>Watching</span></div>
+      <div class="stat"><b id="statDone">0</b><span>Done</span></div>
       <div class="stat"><b id="statTotal">0</b><span>Total</span></div>
       <div class="stat"><b id="statAvg">–</b><span>Avg rank</span></div>
     </div>
@@ -380,9 +395,34 @@
             </select>
           </div>
         </div>
-        <div class="field">
-          <label for="f-watchedDate">Watched date</label>
-          <input type="date" id="f-watchedDate">
+        <div class="field-row">
+          <div class="field">
+            <label for="f-status">Status</label>
+            <select id="f-status">
+              <option value="planned">To watch</option>
+              <option value="watching">Watching</option>
+              <option value="done">Done</option>
+              <option value="dropped">Dropped</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="f-epWatched">Episodes</label>
+            <div class="ep-inputs">
+              <input type="number" id="f-epWatched" min="0" step="1" inputmode="numeric" placeholder="seen" aria-label="Episodes watched">
+              <span>/</span>
+              <input type="number" id="f-epTotal" min="0" step="1" inputmode="numeric" placeholder="total" aria-label="Episodes in total">
+            </div>
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="f-startedDate">Started</label>
+            <input type="date" id="f-startedDate">
+          </div>
+          <div class="field">
+            <label for="f-watchedDate">Finished</label>
+            <input type="date" id="f-watchedDate">
+          </div>
         </div>
         <div class="field">
           <label>Rank <span style="text-transform:none;font-weight:400;">(0–10, click to set)</span></label>
@@ -412,12 +452,23 @@
   var GH_API = "https://api.github.com";
   var SORT_FIELDS = [
     {key:"title", label:"Title"},
+    {key:"status", label:"Status"},
     {key:"mediaType", label:"Type"},
     {key:"genre", label:"Genre"},
-    {key:"watchedDate", label:"Watched date"},
-    {key:"rank", label:"Rank"},
-    {key:"notes", label:"Notes"}
+    {key:"startedDate", label:"Started"},
+    {key:"watchedDate", label:"Finished"},
+    {key:"rank", label:"Rank"}
   ];
+
+  // Cycling order of the row chip, and the order "sort by status" uses.
+  var STATUSES = [
+    {key:"planned",  label:"To watch"},
+    {key:"watching", label:"Watching"},
+    {key:"done",     label:"Done"},
+    {key:"dropped",  label:"Dropped"}
+  ];
+  var STATUS_INDEX = {};
+  STATUSES.forEach(function(s, i){ STATUS_INDEX[s.key] = i; });
 
   var state = {
     entries: [],
@@ -469,7 +520,7 @@
       return e && typeof e === "object" && typeof e.title === "string" && e.title.trim() !== "";
     }).map(function(e){
       if (!e.id) e.id = uid();
-      return e;
+      return normalizeEntry(e);
     });
   }
 
@@ -478,6 +529,43 @@
   }
   function localLoad(){
     try{ return parsePayload(localStorage.getItem("watchlog:entries")); }catch(e){ return null; }
+  }
+
+  // ---------- status & episodes ----------
+  // v1 only had a `watched` flag. `status` is the source of truth now, but `watched` is kept in
+  // step with it so a device still running an older cached copy of the app still reads finished
+  // titles correctly.
+  function today(){ return new Date().toISOString().slice(0,10); }
+
+  function numOrNull(v){
+    if (v === "" || v == null) return null;
+    var n = Number(v);
+    return isFinite(n) && n >= 0 ? Math.floor(n) : null;
+  }
+
+  function statusOf(entry){
+    if (entry.status && STATUS_INDEX[entry.status] != null) return entry.status;
+    return entry.watched ? "done" : "planned";
+  }
+
+  function statusLabel(key){
+    return (STATUSES[STATUS_INDEX[key]] || STATUSES[0]).label;
+  }
+
+  function applyStatus(entry, key){
+    entry.status = key;
+    entry.watched = (key === "done");
+    if (key === "watching" && !entry.startedDate) entry.startedDate = today();
+    if (key === "done" && !entry.watchedDate) entry.watchedDate = today();
+    return entry;
+  }
+
+  function normalizeEntry(entry){
+    entry.status = statusOf(entry);
+    entry.watched = (entry.status === "done");
+    entry.episodesTotal = numOrNull(entry.episodesTotal);
+    entry.episodesWatched = numOrNull(entry.episodesWatched);
+    return entry;
   }
 
   // ---------- merge ----------
@@ -856,6 +944,9 @@
     var mult = gs.sortDir === "asc" ? 1 : -1;
     return list.slice().sort(function(a,b){
       var av = a[gs.sortKey], bv = b[gs.sortKey];
+      if (gs.sortKey === "status"){
+        return (STATUS_INDEX[statusOf(a)] - STATUS_INDEX[statusOf(b)]) * mult;
+      }
       if (gs.sortKey === "rank"){
         av = av == null ? -Infinity : av;
         bv = bv == null ? -Infinity : bv;
@@ -871,9 +962,6 @@
 
   function starIcon(){
     return '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.5l2.9 6.2 6.8.8-5 4.7 1.3 6.8L12 17.7l-6 3.3 1.3-6.8-5-4.7 6.8-.8z"/></svg>';
-  }
-  function checkIcon(){
-    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l5 5 11-11"/></svg>';
   }
   function chevIcon(){
     return '<svg class="chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>';
@@ -954,7 +1042,8 @@
     var keys = Object.keys(groups).sort(function(a,b){ return a.localeCompare(b); });
 
     var live = liveEntries();
-    document.getElementById("statWatched").textContent = live.filter(function(e){return e.watched;}).length;
+    document.getElementById("statWatching").textContent = live.filter(function(e){ return statusOf(e) === "watching"; }).length;
+    document.getElementById("statDone").textContent = live.filter(function(e){ return statusOf(e) === "done"; }).length;
     document.getElementById("statTotal").textContent = live.length;
     var ranked = live.filter(function(e){ return typeof e.rank === "number"; });
     document.getElementById("statAvg").textContent = ranked.length
@@ -991,15 +1080,35 @@
     }).join("");
   }
 
+  function progressHtml(e){
+    var total = numOrNull(e.episodesTotal);
+    if (!total) return "";
+    var seen = numOrNull(e.episodesWatched) || 0;
+    var pct = Math.max(0, Math.min(100, Math.round(seen / total * 100)));
+    return '<span class="progress"><span class="bar"><i style="width:'+pct+'%"></i></span>'+seen+'/'+total+'</span>';
+  }
+
+  // The date worth showing depends on where the title is: when it ended, or when it started.
+  function dateStub(e){
+    var st = statusOf(e);
+    if (st !== "watching" && e.watchedDate) return "Fin " + fmtDate(e.watchedDate);
+    if (e.startedDate) return "Since " + fmtDate(e.startedDate);
+    if (e.watchedDate) return "Fin " + fmtDate(e.watchedDate);
+    return "—";
+  }
+
   function rowHtml(e){
+    var st = statusOf(e);
     var chips = [];
     if (e.genre) chips.push('<span class="chip">'+escapeHtml(e.genre)+'</span>');
+    var prog = progressHtml(e);
+    if (prog) chips.push(prog);
     var rankHtml = typeof e.rank === "number"
       ? '<span class="rank">'+starIcon()+e.rank.toFixed(1)+'</span>'
       : '<span class="rank empty">—</span>';
     return (
-      '<div class="row'+(e.watched?' watched':'')+'" data-id="'+e.id+'">' +
-        '<button type="button" class="check" data-action="toggle-watched" aria-label="'+(e.watched?'Mark not watched':'Mark watched')+'">'+checkIcon()+'</button>' +
+      '<div class="row st-'+st+'" data-id="'+e.id+'">' +
+        '<button type="button" class="status-btn" data-action="cycle-status" aria-label="Status: '+statusLabel(st)+'. Click for the next one."><span class="dot"></span>'+statusLabel(st)+'</button>' +
         '<div class="info" data-action="edit">' +
           '<div class="title">'+escapeHtml(e.title)+'</div>' +
           '<div class="meta">'+chips.join("")+'</div>' +
@@ -1007,7 +1116,7 @@
         '</div>' +
         '<div class="divider"></div>' +
         '<div class="stub">' +
-          '<span class="dates">Watch '+fmtDate(e.watchedDate)+'</span>' +
+          '<span class="dates">'+dateStub(e)+'</span>' +
           rankHtml +
         '</div>' +
         '<div class="row-actions">' +
@@ -1044,15 +1153,12 @@
       var gs3 = getGroupState(key3);
       gs3.sortDir = gs3.sortDir === "asc" ? "desc" : "asc";
       render();
-    } else if (action === "toggle-watched"){
+    } else if (action === "cycle-status"){
       var id = rowEl.getAttribute("data-id");
       var e = state.entries.find(function(x){return x.id===id;});
       if (e){
-        e.watched = !e.watched;
+        applyStatus(e, STATUSES[(STATUS_INDEX[statusOf(e)] + 1) % STATUSES.length].key);
         touch(e);
-        if (e.watched && !e.watchedDate){
-          e.watchedDate = new Date().toISOString().slice(0,10);
-        }
         render();
         sync.save();
       }
@@ -1091,6 +1197,10 @@
       document.getElementById("f-title").value = entry.title || "";
       document.getElementById("f-mediaType").value = entry.mediaType || "";
       document.getElementById("f-genre").value = entry.genre || "";
+      document.getElementById("f-status").value = statusOf(entry);
+      document.getElementById("f-epWatched").value = entry.episodesWatched == null ? "" : entry.episodesWatched;
+      document.getElementById("f-epTotal").value = entry.episodesTotal == null ? "" : entry.episodesTotal;
+      document.getElementById("f-startedDate").value = entry.startedDate || "";
       document.getElementById("f-watchedDate").value = entry.watchedDate || "";
       document.getElementById("f-notes").value = entry.notes || "";
     }
@@ -1117,16 +1227,22 @@
         title: document.getElementById("f-title").value.trim(),
         mediaType: document.getElementById("f-mediaType").value.trim(),
         genre: document.getElementById("f-genre").value.trim(),
+        startedDate: document.getElementById("f-startedDate").value,
         watchedDate: document.getElementById("f-watchedDate").value,
+        episodesWatched: numOrNull(document.getElementById("f-epWatched").value),
+        episodesTotal: numOrNull(document.getElementById("f-epTotal").value),
         rank: rankValue,
         notes: document.getElementById("f-notes").value.trim()
       };
       if (!data.title) return;
+      var statusValue = document.getElementById("f-status").value;
       if (isEdit){
         Object.assign(entry, data);
+        applyStatus(entry, statusValue);
         touch(entry);
       } else {
         data.id = uid();
+        applyStatus(data, statusValue);
         touch(data);
         state.entries.push(data);
       }
