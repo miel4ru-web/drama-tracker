@@ -1,3 +1,6 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
 <title>Watch Log</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -607,8 +610,12 @@
           '<input type="password" id="gh-token" autocomplete="off" placeholder="' + (hasToken ? "Enter a new token to replace the saved one" : "ghp_…") + '">' +
         '</div>' +
         '<p style="font-size:12.5px;color:var(--text-muted);margin:-4px 0 14px;">' +
-          'Needs only the <code>gist</code> scope. ' +
+          'Needs only the <code>gist</code> scope — nothing else. Give it an expiry (90 days). ' +
           '<a href="https://github.com/settings/tokens/new?scopes=gist&description=Watch+Log+sync" target="_blank" rel="noopener" style="color:var(--accent);">Create one on GitHub</a> — stored only in this browser, never committed to the repo.' +
+        '</p>' +
+        '<p style="font-size:12.5px;color:var(--text-muted);margin:-8px 0 14px;">' +
+          'Keep the scope to <code>gist</code> alone: every page under <code>miel4ru-web.github.io</code> shares one browser origin, ' +
+          'so any app hosted there can read a token saved here.' +
         '</p>' +
         '<div class="modal-actions">' +
           '<button type="button" class="btn danger ghost" id="ghDisconnectBtn" style="' + (hasToken ? "" : "display:none;") + '">Disconnect</button>' +
