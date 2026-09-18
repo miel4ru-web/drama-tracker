@@ -285,6 +285,8 @@
   .field-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
   .modal-actions{display:flex;justify-content:space-between;gap:10px;margin-top:18px;}
   .modal-actions .right{display:flex;gap:8px;}
+  .backup{display:flex;align-items:center;gap:8px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border);}
+  .backup-label{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);margin-right:auto;}
 
   .toast{
     position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
@@ -444,14 +446,37 @@
     clearTimeout(toast._h);
     toast._h = setTimeout(function(){ t.classList.remove("show"); }, 2400);
   }
+
+  // ---------- storage payload ----------
+  // v1 stored a bare array. v2 wraps it as {version:2, entries:[…]} so the format can be
+  // migrated later; both shapes are accepted on read.
+  var SCHEMA_VERSION = 2;
+
+  function serializePayload(entries, pretty){
+    var payload = {version: SCHEMA_VERSION, entries: entries};
+    return pretty ? JSON.stringify(payload, null, 2) : JSON.stringify(payload);
+  }
+  // Returns a clean array of entries, or null if the text isn't a readable payload.
+  function parsePayload(raw){
+    if (raw == null || raw === "") return null;
+    var data;
+    try{ data = JSON.parse(raw); }catch(e){ return null; }
+    var list = Array.isArray(data) ? data
+      : (data && Array.isArray(data.entries) ? data.entries : null);
+    if (!list) return null;
+    return list.filter(function(e){
+      return e && typeof e === "object" && typeof e.title === "string" && e.title.trim() !== "";
+    }).map(function(e){
+      if (!e.id) e.id = uid();
+      return e;
+    });
+  }
+
   function localSave(){
-    try{ localStorage.setItem("watchlog:entries", JSON.stringify(state.entries)); }catch(e){}
+    try{ localStorage.setItem("watchlog:entries", serializePayload(state.entries)); }catch(e){}
   }
   function localLoad(){
-    try{
-      var raw = localStorage.getItem("watchlog:entries");
-      return raw ? JSON.parse(raw) : null;
-    }catch(e){ return null; }
+    try{ return parsePayload(localStorage.getItem("watchlog:entries")); }catch(e){ return null; }
   }
 
   // ---------- sync status UI ----------
@@ -537,7 +562,7 @@
         var gist = await sync.ghFetch("/gists/" + id);
         var file = gist.files[GIST_FILENAME];
         var content = file.truncated ? await (await fetch(file.raw_url)).text() : file.content;
-        state.entries = JSON.parse(content || "[]");
+        state.entries = parsePayload(content) || [];
         localSave();
         setSync("ok", "Synced", null, false);
       }catch(err){
@@ -554,7 +579,7 @@
       try{
         var id = getGistId();
         var body = {files: {}};
-        body.files[GIST_FILENAME] = {content: JSON.stringify(state.entries)};
+        body.files[GIST_FILENAME] = {content: serializePayload(state.entries, true)};
         var result;
         if (id){
           result = await sync.ghFetch("/gists/" + id, {method:"PATCH", body: JSON.stringify(body)});
@@ -617,6 +642,15 @@
           'Keep the scope to <code>gist</code> alone: every page under <code>miel4ru-web.github.io</code> shares one browser origin, ' +
           'so any app hosted there can read a token saved here.' +
         '</p>' +
+        '<div class="backup">' +
+          '<span class="backup-label">Backup</span>' +
+          '<button type="button" class="btn ghost" id="exportBtn">Export JSON</button>' +
+          '<button type="button" class="btn ghost" id="importBtn">Import JSON</button>' +
+          '<input type="file" id="importFile" accept="application/json,.json" style="display:none;">' +
+        '</div>' +
+        '<p style="font-size:12.5px;color:var(--text-muted);margin:8px 0 0;">' +
+          'Import only adds: a title already here is left untouched, so restoring a backup can never overwrite what you have.' +
+        '</p>' +
         '<div class="modal-actions">' +
           '<button type="button" class="btn danger ghost" id="ghDisconnectBtn" style="' + (hasToken ? "" : "display:none;") + '">Disconnect</button>' +
           '<div class="right">' +
@@ -655,6 +689,49 @@
       sync.init();
       sync.load().then(render);
       toast("Connecting…");
+    });
+
+    overlay.querySelector("#exportBtn").addEventListener("click", function(){
+      var blob = new Blob([serializePayload(state.entries, true)], {type: "application/json"});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "watchlog-" + new Date().toISOString().slice(0,10) + ".json";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 0);
+      toast("Exported " + state.entries.length + (state.entries.length === 1 ? " title" : " titles"));
+    });
+
+    var fileInput = overlay.querySelector("#importFile");
+    overlay.querySelector("#importBtn").addEventListener("click", function(){ fileInput.click(); });
+    fileInput.addEventListener("change", function(){
+      var file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onerror = function(){ toast("Couldn't read that file"); };
+      reader.onload = function(){
+        var incoming = parsePayload(reader.result);
+        fileInput.value = "";
+        if (!incoming){ toast("That file isn't a Watch Log backup"); return; }
+        var seen = {};
+        state.entries.forEach(function(e){ seen[e.id] = true; });
+        var added = 0;
+        incoming.forEach(function(e){
+          if (seen[e.id]) return;
+          seen[e.id] = true;
+          state.entries.push(e);
+          added++;
+        });
+        close();
+        render();
+        if (added) sync.save();
+        toast(added
+          ? "Imported " + added + " of " + incoming.length
+          : "Nothing new — all " + incoming.length + " already here");
+      };
+      reader.readAsText(file);
     });
 
     setTimeout(function(){ document.getElementById("gh-token").focus(); }, 0);
