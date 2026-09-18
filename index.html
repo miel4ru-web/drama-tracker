@@ -425,7 +425,8 @@
     search: "",
     groupState: {}, // mediaType -> {collapsed, sortKey, sortDir}
     saving: false,
-    pendingSave: false
+    pendingSave: false,
+    gistVersion: null
   };
 
   // ---------- utils ----------
@@ -477,6 +478,68 @@
   }
   function localLoad(){
     try{ return parsePayload(localStorage.getItem("watchlog:entries")); }catch(e){ return null; }
+  }
+
+  // ---------- merge ----------
+  // Every edit stamps updatedAt, and a delete leaves a tombstone (deletedAt) instead of dropping
+  // the row, so a merge can tell "deleted here" from "never seen here". Entries written before
+  // these fields existed have no updatedAt; they compare as oldest and lose to any stamped copy.
+  var TOMBSTONE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+  function nowISO(){ return new Date().toISOString(); }
+
+  function touch(entry){
+    entry.updatedAt = nowISO();
+    if (!entry.createdAt) entry.createdAt = entry.updatedAt;
+    return entry;
+  }
+
+  function liveEntries(){
+    return state.entries.filter(function(e){ return !e.deletedAt; });
+  }
+
+  // Later updatedAt wins; on a tie the first argument (the local copy) stays put.
+  function newerOf(mine, theirs){
+    return (theirs.updatedAt || "") > (mine.updatedAt || "") ? theirs : mine;
+  }
+
+  function mergeEntries(mine, theirs){
+    var byId = {}, order = [];
+    function absorb(list){
+      (list || []).forEach(function(e){
+        if (!e || !e.id) return;
+        if (!byId[e.id]){ byId[e.id] = e; order.push(e.id); return; }
+        byId[e.id] = newerOf(byId[e.id], e);
+      });
+    }
+    absorb(mine);
+    absorb(theirs);
+    return order.map(function(id){ return byId[id]; });
+  }
+
+  // Order-independent fingerprint: what this set knows, and how fresh each part is.
+  function signature(entries){
+    return (entries || []).map(function(e){ return e.id + "@" + (e.updatedAt || ""); }).sort().join("|");
+  }
+
+  function gistVersionOf(gist){
+    return (gist && gist.history && gist.history[0] && gist.history[0].version) || null;
+  }
+
+  function gistBody(){
+    var body = {files: {}};
+    body.files[GIST_FILENAME] = {content: serializePayload(state.entries, true)};
+    return body;
+  }
+
+  // Tombstones only need to outlive the other devices' caches.
+  function purgeTombstones(entries){
+    var cutoff = Date.now() - TOMBSTONE_TTL_MS;
+    return entries.filter(function(e){
+      if (!e.deletedAt) return true;
+      var t = Date.parse(e.deletedAt);
+      return isNaN(t) || t >= cutoff;
+    });
   }
 
   // ---------- sync status UI ----------
@@ -555,20 +618,30 @@
           if (id) setGistId(id);
         }
         if (!id){
-          state.entries = localLoad() || [];
+          state.entries = purgeTombstones(localLoad() || []);
           setSync("ok", "Synced", noteText("First time here — add a title to start."), false);
           return;
         }
         var gist = await sync.ghFetch("/gists/" + id);
-        var file = gist.files[GIST_FILENAME];
-        var content = file.truncated ? await (await fetch(file.raw_url)).text() : file.content;
-        state.entries = parsePayload(content) || [];
+        state.gistVersion = gistVersionOf(gist);
+        var remote = parsePayload(await sync.readGistFile(gist)) || [];
+        var local = localLoad() || state.entries || [];
+        state.entries = purgeTombstones(mergeEntries(local, remote));
         localSave();
         setSync("ok", "Synced", null, false);
+        // Whatever this device knows that the gist doesn't has to go back up — otherwise an edit
+        // made while offline disappears the next time any device saves.
+        if (signature(state.entries) !== signature(remote)) await sync.save();
       }catch(err){
         sync.handleError(err, "load");
-        state.entries = localLoad() || state.entries || [];
+        state.entries = purgeTombstones(localLoad() || state.entries || []);
       }
+    },
+
+    async readGistFile(gist){
+      var file = gist && gist.files && gist.files[GIST_FILENAME];
+      if (!file) return null;
+      return file.truncated ? await (await fetch(file.raw_url)).text() : file.content;
     },
 
     async save(){
@@ -578,17 +651,28 @@
       setSync("warn", "Saving…", null, true);
       try{
         var id = getGistId();
-        var body = {files: {}};
-        body.files[GIST_FILENAME] = {content: serializePayload(state.entries, true)};
         var result;
         if (id){
-          result = await sync.ghFetch("/gists/" + id, {method:"PATCH", body: JSON.stringify(body)});
+          // A gist PATCH replaces the whole file, so if another device wrote since we last read,
+          // fold its version in first instead of flattening it.
+          var current = await sync.ghFetch("/gists/" + id);
+          if (gistVersionOf(current) !== state.gistVersion){
+            var theirs = parsePayload(await sync.readGistFile(current));
+            if (theirs){
+              state.entries = purgeTombstones(mergeEntries(state.entries, theirs));
+              localSave();
+              render();
+            }
+          }
+          result = await sync.ghFetch("/gists/" + id, {method:"PATCH", body: JSON.stringify(gistBody())});
         } else {
+          var body = gistBody();
           body.description = "Watch Log data (auto-synced by the app — don't rename the file)";
           body.public = false;
           result = await sync.ghFetch("/gists", {method:"POST", body: JSON.stringify(body)});
           setGistId(result.id);
         }
+        state.gistVersion = gistVersionOf(result);
         localSave();
         setSync("ok", "Synced", null, false);
       }catch(err){
@@ -701,7 +785,8 @@
       a.click();
       a.remove();
       setTimeout(function(){ URL.revokeObjectURL(url); }, 0);
-      toast("Exported " + state.entries.length + (state.entries.length === 1 ? " title" : " titles"));
+      var n = liveEntries().length;
+      toast("Exported " + n + (n === 1 ? " title" : " titles"));
     });
 
     var fileInput = overlay.querySelector("#importFile");
@@ -713,6 +798,7 @@
       reader.onerror = function(){ toast("Couldn't read that file"); };
       reader.onload = function(){
         var incoming = parsePayload(reader.result);
+        if (incoming) incoming = incoming.filter(function(e){ return !e.deletedAt; });
         fileInput.value = "";
         if (!incoming){ toast("That file isn't a Watch Log backup"); return; }
         var seen = {};
@@ -740,8 +826,9 @@
   // ---------- rendering ----------
   function filtered(){
     var q = state.search.trim().toLowerCase();
-    if (!q) return state.entries;
-    return state.entries.filter(function(e){
+    var all = liveEntries();
+    if (!q) return all;
+    return all.filter(function(e){
       return [e.title, e.genre, e.mediaType].some(function(f){
         return (f||"").toLowerCase().indexOf(q) !== -1;
       });
@@ -866,16 +953,17 @@
     var groups = groupBy(entries);
     var keys = Object.keys(groups).sort(function(a,b){ return a.localeCompare(b); });
 
-    document.getElementById("statWatched").textContent = state.entries.filter(function(e){return e.watched;}).length;
-    document.getElementById("statTotal").textContent = state.entries.length;
-    var ranked = state.entries.filter(function(e){ return typeof e.rank === "number"; });
+    var live = liveEntries();
+    document.getElementById("statWatched").textContent = live.filter(function(e){return e.watched;}).length;
+    document.getElementById("statTotal").textContent = live.length;
+    var ranked = live.filter(function(e){ return typeof e.rank === "number"; });
     document.getElementById("statAvg").textContent = ranked.length
       ? (ranked.reduce(function(s,e){return s+e.rank;},0) / ranked.length).toFixed(1)
       : "–";
 
     if (!keys.length){
       container.innerHTML = '<div class="empty-state">' +
-        (state.entries.length ? "No titles match your search." : "Nothing logged yet — add your first title.") +
+        (live.length ? "No titles match your search." : "Nothing logged yet — add your first title.") +
         '</div>';
       return;
     }
@@ -961,6 +1049,7 @@
       var e = state.entries.find(function(x){return x.id===id;});
       if (e){
         e.watched = !e.watched;
+        touch(e);
         if (e.watched && !e.watchedDate){
           e.watchedDate = new Date().toISOString().slice(0,10);
         }
@@ -1014,7 +1103,8 @@
     });
 
     document.getElementById("deleteBtn").addEventListener("click", function(){
-      state.entries = state.entries.filter(function(e){return e.id !== entry.id;});
+      entry.deletedAt = nowISO();
+      touch(entry);
       close();
       render();
       sync.save();
@@ -1034,8 +1124,10 @@
       if (!data.title) return;
       if (isEdit){
         Object.assign(entry, data);
+        touch(entry);
       } else {
         data.id = uid();
+        touch(data);
         state.entries.push(data);
       }
       close();
@@ -1053,7 +1145,7 @@
     if (ok){
       await sync.load();
     } else {
-      state.entries = localLoad() || [];
+      state.entries = purgeTombstones(localLoad() || []);
       setSync("warn", "Local only", noteRetry("Connect GitHub to sync across devices.", openSyncModal, "Connect"), false);
     }
     render();
