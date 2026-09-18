@@ -157,6 +157,33 @@
   .btn.danger{color:var(--danger);}
   .btn:disabled{opacity:.5;cursor:default;}
 
+  /* ---- View bar: status filter + grouping ---- */
+  .viewbar{
+    display:flex;gap:10px 16px;flex-wrap:wrap;align-items:center;margin-bottom:20px;
+  }
+  .filters{display:flex;gap:6px;flex-wrap:wrap;}
+  .fchip{
+    border:1px solid var(--border);background:var(--surface);color:var(--text-muted);
+    border-radius:999px;padding:5px 11px;cursor:pointer;font-size:12.5px;font-weight:600;
+    display:inline-flex;align-items:center;gap:6px;
+  }
+  .fchip:hover{border-color:var(--border-strong);}
+  .fchip .n{
+    font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-size:11px;
+    color:var(--text-muted);background:var(--bg);border-radius:999px;padding:0 5px;
+  }
+  .fchip.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);}
+  .fchip.on .n{background:rgba(255,255,255,0.22);color:inherit;}
+  .fchip.empty:not(.on){opacity:.55;}
+  .groupby{
+    margin-left:auto;display:inline-flex;align-items:center;gap:7px;
+    font-size:12px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);
+  }
+  .groupby select{
+    background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:5px 8px;color:var(--text);
+    font-size:13px;font-weight:600;letter-spacing:normal;text-transform:none;
+  }
+
   /* ---- Groups ---- */
   .group{
     background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
@@ -338,13 +365,20 @@
   <div class="toolbar">
     <div class="search">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-      <input type="text" id="searchInput" placeholder="Search title, genre…" aria-label="Search">
+      <input type="text" id="searchInput" placeholder="Search title, genre, notes…" aria-label="Search">
     </div>
     <button class="btn ghost" id="refreshBtn" title="Pull latest from GitHub">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 4v6h-6"/></svg>
       Refresh
     </button>
     <button class="btn primary" id="addBtn">+ Add title</button>
+  </div>
+
+  <div class="viewbar">
+    <div class="filters" id="statusFilters" role="group" aria-label="Filter by status"></div>
+    <label class="groupby">Group by
+      <select id="groupBySelect" aria-label="Group titles by"></select>
+    </label>
   </div>
 
   <div id="groups"></div>
@@ -468,13 +502,25 @@
     {key:"dropped",  label:"Dropped"}
   ];
   var STATUS_INDEX = {};
-  STATUSES.forEach(function(s, i){ STATUS_INDEX[s.key] = i; });
+  var STATUS_LABEL_INDEX = {};
+  STATUSES.forEach(function(s, i){ STATUS_INDEX[s.key] = i; STATUS_LABEL_INDEX[s.label] = i; });
+
+  // What the rows can be grouped by. "status" groups on the derived status label, the others on
+  // a plain entry field.
+  var GROUP_FIELDS = [
+    {key:"mediaType", label:"Type"},
+    {key:"status",    label:"Status"},
+    {key:"genre",     label:"Genre"}
+  ];
+  var GROUP_KEYS = GROUP_FIELDS.map(function(f){ return f.key; });
 
   var state = {
     entries: [],
     mode: "init", // init | github | local
     search: "",
-    groupState: {}, // mediaType -> {collapsed, sortKey, sortDir}
+    filter: "all",   // "all" or a status key
+    groupBy: "mediaType",
+    groupState: {},  // "<groupBy>:<group key>" -> {collapsed, sortKey, sortDir}
     saving: false,
     pendingSave: false,
     gistVersion: null
@@ -522,6 +568,47 @@
       if (!e.id) e.id = uid();
       return normalizeEntry(e);
     });
+  }
+
+  // How the list is laid out (filter, grouping, per-group collapse/sort) is a per-device view
+  // preference, so it lives in its own localStorage key and never travels to the gist with the
+  // entries. Anything unrecognised on read falls back to the default.
+  var VIEW_KEY = "watchlog:view";
+  var DEFAULT_SORT_KEY = "watchedDate";
+  var DEFAULT_SORT_DIR = "desc";
+  var SORT_KEYS = SORT_FIELDS.map(function(f){ return f.key; });
+
+  function isDefaultGroupState(gs){
+    return !gs.collapsed && gs.sortKey === DEFAULT_SORT_KEY && gs.sortDir === DEFAULT_SORT_DIR;
+  }
+  function viewSave(){
+    var kept = {};
+    Object.keys(state.groupState).forEach(function(k){
+      if (!isDefaultGroupState(state.groupState[k])) kept[k] = state.groupState[k];
+    });
+    try{
+      localStorage.setItem(VIEW_KEY, JSON.stringify({
+        filter: state.filter, groupBy: state.groupBy, groupState: kept
+      }));
+    }catch(e){}
+  }
+  function viewLoad(){
+    var v;
+    try{ v = JSON.parse(localStorage.getItem(VIEW_KEY) || "null"); }catch(e){ return; }
+    if (!v || typeof v !== "object") return;
+    if (v.filter === "all" || STATUS_INDEX[v.filter] != null) state.filter = v.filter;
+    if (GROUP_KEYS.indexOf(v.groupBy) !== -1) state.groupBy = v.groupBy;
+    if (v.groupState && typeof v.groupState === "object"){
+      Object.keys(v.groupState).forEach(function(k){
+        var gs = v.groupState[k];
+        if (!gs || typeof gs !== "object") return;
+        state.groupState[k] = {
+          collapsed: !!gs.collapsed,
+          sortKey: SORT_KEYS.indexOf(gs.sortKey) !== -1 ? gs.sortKey : DEFAULT_SORT_KEY,
+          sortDir: gs.sortDir === "asc" ? "asc" : DEFAULT_SORT_DIR
+        };
+      });
+    }
   }
 
   function localSave(){
@@ -912,32 +999,49 @@
   }
 
   // ---------- rendering ----------
-  function filtered(){
+  function searchMatched(all){
     var q = state.search.trim().toLowerCase();
-    var all = liveEntries();
     if (!q) return all;
     return all.filter(function(e){
-      return [e.title, e.genre, e.mediaType].some(function(f){
+      return [e.title, e.genre, e.mediaType, e.notes].some(function(f){
         return (f||"").toLowerCase().indexOf(q) !== -1;
       });
     });
   }
 
+  function groupKeyOf(e){
+    if (state.groupBy === "status") return statusLabel(statusOf(e));
+    var v = String(e[state.groupBy] == null ? "" : e[state.groupBy]).trim();
+    return v || (state.groupBy === "genre" ? "No genre" : "Uncategorized");
+  }
+
   function groupBy(entries){
     var groups = {};
     entries.forEach(function(e){
-      var key = (e.mediaType || "Uncategorized").trim() || "Uncategorized";
+      var key = groupKeyOf(e);
       if (!groups[key]) groups[key] = [];
       groups[key].push(e);
     });
     return groups;
   }
 
-  function getGroupState(key){
-    if (!state.groupState[key]){
-      state.groupState[key] = {collapsed:false, sortKey:"watchedDate", sortDir:"desc"};
+  // Status groups read in watch order, not alphabetically.
+  function groupKeys(groups){
+    var keys = Object.keys(groups);
+    if (state.groupBy === "status"){
+      return keys.sort(function(a,b){ return STATUS_LABEL_INDEX[a] - STATUS_LABEL_INDEX[b]; });
     }
-    return state.groupState[key];
+    return keys.sort(function(a,b){ return a.localeCompare(b); });
+  }
+
+  // Collapse/sort is remembered per grouping mode: "Drama" as a type and "Drama" as a genre are
+  // different groups and must not share one state.
+  function getGroupState(key){
+    var k = state.groupBy + ":" + key;
+    if (!state.groupState[k]){
+      state.groupState[k] = {collapsed:false, sortKey:DEFAULT_SORT_KEY, sortDir:DEFAULT_SORT_DIR};
+    }
+    return state.groupState[k];
   }
 
   function sortEntries(list, gs){
@@ -1035,13 +1139,33 @@
     container.setAttribute("aria-valuenow", value == null ? "" : value);
   }
 
+  // Counts are of the search result, so the chips show how the current search breaks down.
+  function renderFilters(pool){
+    var counts = {all: pool.length};
+    STATUSES.forEach(function(s){ counts[s.key] = 0; });
+    pool.forEach(function(e){ counts[statusOf(e)]++; });
+    var items = [{key:"all", label:"All"}].concat(STATUSES);
+    document.getElementById("statusFilters").innerHTML = items.map(function(it){
+      var on = state.filter === it.key;
+      return '<button type="button" class="fchip' + (on ? " on" : "") +
+        (counts[it.key] ? "" : " empty") + '" data-filter="' + it.key +
+        '" aria-pressed="' + (on ? "true" : "false") + '">' + escapeHtml(it.label) +
+        '<span class="n">' + counts[it.key] + '</span></button>';
+    }).join("");
+  }
+
   function render(){
     var container = document.getElementById("groups");
-    var entries = filtered();
-    var groups = groupBy(entries);
-    var keys = Object.keys(groups).sort(function(a,b){ return a.localeCompare(b); });
-
     var live = liveEntries();
+    var pool = searchMatched(live);
+    renderFilters(pool);
+    document.getElementById("groupBySelect").value = state.groupBy;
+
+    var entries = state.filter === "all"
+      ? pool
+      : pool.filter(function(e){ return statusOf(e) === state.filter; });
+    var groups = groupBy(entries);
+    var keys = groupKeys(groups);
     document.getElementById("statWatching").textContent = live.filter(function(e){ return statusOf(e) === "watching"; }).length;
     document.getElementById("statDone").textContent = live.filter(function(e){ return statusOf(e) === "done"; }).length;
     document.getElementById("statTotal").textContent = live.length;
@@ -1051,9 +1175,12 @@
       : "–";
 
     if (!keys.length){
-      container.innerHTML = '<div class="empty-state">' +
-        (live.length ? "No titles match your search." : "Nothing logged yet — add your first title.") +
-        '</div>';
+      var msg;
+      if (!live.length) msg = "Nothing logged yet — add your first title.";
+      else if (!pool.length) msg = "No titles match your search.";
+      else msg = "Nothing is \u201C" + statusLabel(state.filter) + "\u201D" +
+        (state.search.trim() ? " in this search." : " yet.");
+      container.innerHTML = '<div class="empty-state">' + escapeHtml(msg) + '</div>';
       return;
     }
 
@@ -1133,6 +1260,7 @@
     var groupEl = ev.target.closest(".group");
     var key = groupEl.getAttribute("data-group");
     getGroupState(key).sortKey = actionEl.value;
+    viewSave();
     render();
   });
 
@@ -1147,11 +1275,13 @@
       var key = groupEl.getAttribute("data-group");
       var gs = getGroupState(key);
       gs.collapsed = !gs.collapsed;
+      viewSave();
       render();
     } else if (action === "sort-dir"){
       var key3 = groupEl.getAttribute("data-group");
       var gs3 = getGroupState(key3);
       gs3.sortDir = gs3.sortDir === "asc" ? "desc" : "asc";
+      viewSave();
       render();
     } else if (action === "cycle-status"){
       var id = rowEl.getAttribute("data-id");
@@ -1167,6 +1297,20 @@
       var e2 = state.entries.find(function(x){return x.id===id2;});
       openModal(e2);
     }
+  });
+
+  document.getElementById("statusFilters").addEventListener("click", function(ev){
+    var chip = ev.target.closest("[data-filter]");
+    if (!chip) return;
+    state.filter = chip.getAttribute("data-filter");
+    viewSave();
+    render();
+  });
+
+  document.getElementById("groupBySelect").addEventListener("change", function(ev){
+    state.groupBy = ev.target.value;
+    viewSave();
+    render();
   });
 
   document.getElementById("searchInput").addEventListener("input", function(ev){
@@ -1257,6 +1401,10 @@
 
   // ---------- boot ----------
   (async function boot(){
+    viewLoad();
+    document.getElementById("groupBySelect").innerHTML = GROUP_FIELDS.map(function(f){
+      return '<option value="' + f.key + '">' + f.label + '</option>';
+    }).join("");
     var ok = sync.init();
     if (ok){
       await sync.load();
