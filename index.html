@@ -252,6 +252,10 @@
 
   .info{min-width:0;}
   .info .title{font-weight:700;font-size:14.5px;overflow-wrap:anywhere;}
+  .info .title .year{
+    font-weight:600;font-size:12.5px;color:var(--text-muted);
+    font-family:var(--font-mono);font-variant-numeric:tabular-nums;margin-left:5px;
+  }
   .info .meta{display:flex;flex-wrap:wrap;gap:6px 10px;margin-top:4px;align-items:center;}
   .chip{
     font-size:11.5px;color:var(--text-muted);background:var(--surface-alt);border:1px solid var(--border);
@@ -322,6 +326,12 @@
   .star-picker .star.half .fg svg{clip-path:inset(0 50% 0 0);}
   .star-picker .star.full .fg svg{clip-path:inset(0 0 0 0);}
   .field-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+  /* Type / Genre / Year: the year is a 4-digit box, so it gets a fixed narrow column. */
+  .field-row.with-year{grid-template-columns:1fr 1fr 86px;}
+  @media (max-width:520px){
+    .field-row.with-year{grid-template-columns:1fr 1fr;}
+    .field-row.with-year .field:last-child{grid-column:1 / -1;}
+  }
 
   /* ---- Wikidata lookup ---- */
   .title-row{display:flex;gap:8px;}
@@ -420,7 +430,7 @@
           </div>
           <div class="lookup" id="lookupPanel" hidden></div>
         </div>
-        <div class="field-row">
+        <div class="field-row with-year">
           <div class="field">
             <label for="f-mediaType">Type</label>
             <select id="f-mediaType">
@@ -452,6 +462,10 @@
               <option value="Family">Family</option>
               <option value="Music">Music</option>
             </select>
+          </div>
+          <div class="field">
+            <label for="f-year">Year</label>
+            <input type="number" id="f-year" min="1870" max="2200" step="1" inputmode="numeric" placeholder="2016">
           </div>
         </div>
         <div class="field-row">
@@ -514,6 +528,7 @@
     {key:"status", label:"Status"},
     {key:"mediaType", label:"Type"},
     {key:"genre", label:"Genre"},
+    {key:"year", label:"Year"},
     {key:"startedDate", label:"Started"},
     {key:"watchedDate", label:"Finished"},
     {key:"rank", label:"Rank"}
@@ -655,6 +670,16 @@
     return isFinite(n) && n >= 0 ? Math.floor(n) : null;
   }
 
+  // Release year for a film, first-broadcast year for a series. Stored as a number, and only
+  // when it is a plausible year — a stray "16" or "20166" is dropped rather than shown.
+  function yearOrNull(v){
+    if (v === "" || v == null) return null;
+    var n = Number(v);
+    if (!isFinite(n)) return null;
+    n = Math.floor(n);
+    return (n >= 1870 && n <= 2200) ? n : null;
+  }
+
   function statusOf(entry){
     if (entry.status && STATUS_INDEX[entry.status] != null) return entry.status;
     return entry.watched ? "done" : "planned";
@@ -677,6 +702,7 @@
     entry.watched = (entry.status === "done");
     entry.episodesTotal = numOrNull(entry.episodesTotal);
     entry.episodesWatched = numOrNull(entry.episodesWatched);
+    entry.year = yearOrNull(entry.year);
     return entry;
   }
 
@@ -1162,8 +1188,8 @@
     var q = state.search.trim().toLowerCase();
     if (!q) return all;
     return all.filter(function(e){
-      return [e.title, e.genre, e.mediaType, e.notes].some(function(f){
-        return (f||"").toLowerCase().indexOf(q) !== -1;
+      return [e.title, e.genre, e.mediaType, e.notes, e.year].some(function(f){
+        return String(f == null ? "" : f).toLowerCase().indexOf(q) !== -1;
       });
     });
   }
@@ -1210,7 +1236,7 @@
       if (gs.sortKey === "status"){
         return (STATUS_INDEX[statusOf(a)] - STATUS_INDEX[statusOf(b)]) * mult;
       }
-      if (gs.sortKey === "rank"){
+      if (gs.sortKey === "rank" || gs.sortKey === "year"){
         av = av == null ? -Infinity : av;
         bv = bv == null ? -Infinity : bv;
         return (av - bv) * mult;
@@ -1396,7 +1422,8 @@
       '<div class="row st-'+st+'" data-id="'+e.id+'">' +
         '<button type="button" class="status-btn" data-action="cycle-status" aria-label="Status: '+statusLabel(st)+'. Click for the next one."><span class="dot"></span>'+statusLabel(st)+'</button>' +
         '<div class="info" data-action="edit">' +
-          '<div class="title">'+escapeHtml(e.title)+'</div>' +
+          '<div class="title">'+escapeHtml(e.title) +
+          (e.year ? '<span class="year">'+e.year+'</span>' : '') + '</div>' +
           '<div class="meta">'+chips.join("")+'</div>' +
           (e.notes ? '<div class="notes-preview">'+escapeHtml(e.notes)+'</div>' : '') +
         '</div>' +
@@ -1501,6 +1528,7 @@
       document.getElementById("f-title").value = entry.title || "";
       document.getElementById("f-mediaType").value = entry.mediaType || "";
       document.getElementById("f-genre").value = entry.genre || "";
+      document.getElementById("f-year").value = entry.year == null ? "" : entry.year;
       document.getElementById("f-status").value = statusOf(entry);
       document.getElementById("f-epWatched").value = entry.episodesWatched == null ? "" : entry.episodesWatched;
       document.getElementById("f-epTotal").value = entry.episodesTotal == null ? "" : entry.episodesTotal;
@@ -1547,6 +1575,7 @@
       var typeEl = document.getElementById("f-mediaType");
       var genreEl = document.getElementById("f-genre");
       var epEl = document.getElementById("f-epTotal");
+      var yearEl = document.getElementById("f-year");
       var f = c.facts;
       var filled = [];
       if (c.label) document.getElementById("f-title").value = c.label;
@@ -1556,6 +1585,7 @@
         var genre = mapKeywords(GENRE_KEYWORDS, f.genres);
         if (genre && !genreEl.value && hasOption(genreEl, genre)){ genreEl.value = genre; filled.push("Genre"); }
         if (f.eps && !epEl.value){ epEl.value = f.eps; filled.push("Episodes"); }
+        if (f.year && !yearEl.value){ yearEl.value = f.year; filled.push("Year"); }
       }
       lookupMeta = {wikidataId:id, imdbId:(f && f.imdb) || ""};
       panelMsg(filled.length ? "Filled from Wikidata: " + filled.join(", ")
@@ -1616,6 +1646,7 @@
         title: document.getElementById("f-title").value.trim(),
         mediaType: document.getElementById("f-mediaType").value.trim(),
         genre: document.getElementById("f-genre").value.trim(),
+        year: yearOrNull(document.getElementById("f-year").value),
         startedDate: document.getElementById("f-startedDate").value,
         watchedDate: document.getElementById("f-watchedDate").value,
         episodesWatched: numOrNull(document.getElementById("f-epWatched").value),
