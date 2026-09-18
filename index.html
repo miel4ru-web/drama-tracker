@@ -322,6 +322,27 @@
   .star-picker .star.half .fg svg{clip-path:inset(0 50% 0 0);}
   .star-picker .star.full .fg svg{clip-path:inset(0 0 0 0);}
   .field-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+
+  /* ---- Wikidata lookup ---- */
+  .title-row{display:flex;gap:8px;}
+  .title-row input{flex:1;min-width:0;}
+  .title-row .btn{flex:none;padding:0 12px;font-size:13px;}
+  .lookup{
+    margin-top:8px;border:1px solid var(--border);border-radius:8px;
+    background:var(--surface-alt);overflow:hidden auto;max-height:232px;
+  }
+  .lookup[hidden]{display:none;}
+  .lookup-msg{padding:9px 11px;font-size:12.5px;color:var(--text-muted);}
+  .lookup-msg.err{color:var(--danger);}
+  .cand{
+    display:block;width:100%;text-align:left;border:none;border-top:1px solid var(--border);
+    background:transparent;padding:8px 11px;cursor:pointer;color:var(--text);font-size:13px;
+  }
+  .cand:first-child{border-top:none;}
+  .cand:hover{background:var(--accent-soft);}
+  .cand b{font-weight:700;}
+  .cand .hint{font-family:var(--font-mono);font-size:11px;color:var(--accent);margin-left:6px;}
+  .cand .desc{display:block;color:var(--text-muted);font-size:11.5px;margin-top:1px;}
   .ep-inputs{display:flex;align-items:center;gap:6px;}
   .ep-inputs span{color:var(--text-muted);font-size:13px;}
   .modal-actions{display:flex;justify-content:space-between;gap:10px;margin-top:18px;}
@@ -393,7 +414,11 @@
       <form id="entryForm">
         <div class="field">
           <label for="f-title">Title</label>
-          <input type="text" id="f-title" required autocomplete="off">
+          <div class="title-row">
+            <input type="text" id="f-title" required autocomplete="off">
+            <button type="button" class="btn ghost" id="lookupBtn" title="Look this title up on Wikidata">Look up</button>
+          </div>
+          <div class="lookup" id="lookupPanel" hidden></div>
         </div>
         <div class="field-row">
           <div class="field">
@@ -998,6 +1023,140 @@
     setTimeout(function(){ document.getElementById("gh-token").focus(); }, 0);
   }
 
+  // ---------- Wikidata lookup ----------
+  // Autofill for the entry form, on an explicit button press only: the typed title leaves the
+  // browser when the user asks for it, never on its own. No API key and no dependency — both
+  // wikidata.org and query.wikidata.org answer with Access-Control-Allow-Origin:*, so this works
+  // on GitHub Pages and from a local file:// copy alike.
+  //
+  // Two requests per lookup: wbsearchentities for the candidate list (Korean labels, with the
+  // English fallback), then one SPARQL query resolving type/genre/episodes/year/IMDb id for every
+  // candidate at once. Reading whole entities instead would be far heavier and unpredictable —
+  // Q19718090 (the Signal messenger) alone is 2.5 MB of claims, where the SPARQL answer for seven
+  // candidates is 8 KB.
+  var WD_API = "https://www.wikidata.org/w/api.php";
+  var WD_SPARQL = "https://query.wikidata.org/sparql";
+  var WD_UA = "WatchLog/1.0 (https://miel4ru-web.github.io/drama-tracker/)";
+  var WD_TIMEOUT_MS = 10000;
+  var WD_LIMIT = 7;
+
+  // Wikidata states type and genre as entity ids, and their English labels are conveniently
+  // literal ("thriller film", "anime television series", "police television drama"), so this maps
+  // on label keywords instead of pinning hundreds of ids. Within a label the first keyword that
+  // hits wins, so the specific ones come first ("documentary film" must not read as a film).
+  var TYPE_KEYWORDS = [
+    ["anime", "Anime"],
+    ["documentary", "Documentary"],
+    ["web series", "Web Series"],
+    ["web television", "Web Series"],
+    ["variety", "Variety Show"],
+    ["talk show", "Variety Show"],
+    ["game show", "Variety Show"],
+    ["reality", "Variety Show"],
+    ["television", "Drama"],
+    ["tv series", "Drama"],
+    ["miniseries", "Drama"],
+    ["telenovela", "Drama"],
+    ["sitcom", "Drama"],
+    ["film", "Movie"],
+    ["movie", "Movie"]
+  ];
+  var GENRE_KEYWORDS = [
+    ["romantic", "Romance"], ["romance", "Romance"],
+    ["melodrama", "Melodrama"],
+    ["black comedy", "Comedy"], ["comedy", "Comedy"], ["sitcom", "Comedy"],
+    ["police", "Crime"], ["crime", "Crime"], ["gangster", "Crime"], ["heist", "Crime"],
+    ["thriller", "Thriller"], ["suspense", "Thriller"],
+    ["mystery", "Mystery"], ["detective", "Mystery"],
+    ["action", "Action"], ["martial arts", "Action"],
+    ["fantasy", "Fantasy"],
+    ["horror", "Horror"],
+    ["science fiction", "Sci-Fi"], ["sci-fi", "Sci-Fi"],
+    ["historical", "Historical"], ["period", "Historical"], ["sageuk", "Historical"],
+    ["slice of life", "Slice of Life"],
+    ["family", "Family"],
+    ["musical", "Music"], ["music", "Music"]
+  ];
+
+  function mapKeywords(table, texts){
+    for (var i=0;i<(texts||[]).length;i++){
+      var t = String(texts[i]).toLowerCase();
+      for (var k=0;k<table.length;k++){
+        if (t.indexOf(table[k][0]) !== -1) return table[k][1];
+      }
+    }
+    return "";
+  }
+  function hasOption(sel, value){
+    return Array.prototype.some.call(sel.options, function(o){ return o.value === value; });
+  }
+
+  function wdTimed(run){
+    var ctl = ("AbortController" in window) ? new AbortController() : null;
+    var timer = setTimeout(function(){ if (ctl) ctl.abort(); }, WD_TIMEOUT_MS);
+    return run(ctl ? ctl.signal : undefined).then(function(v){
+      clearTimeout(timer);
+      return v;
+    }, function(err){
+      clearTimeout(timer);
+      throw (err && err.name === "AbortError") ? new Error("timed out") : err;
+    });
+  }
+
+  function wdSearch(q, lang){
+    var url = WD_API + "?action=wbsearchentities&format=json&origin=*&type=item&limit=" + WD_LIMIT +
+      "&language=" + lang + "&uselang=" + lang + "&search=" + encodeURIComponent(q);
+    return wdTimed(function(signal){
+      return fetch(url, {signal:signal}).then(function(r){
+        if (!r.ok) throw new Error("search HTTP " + r.status);
+        return r.json();
+      });
+    }).then(function(j){
+      if (j.error) throw new Error(j.error.info || "search failed");
+      return (j.search || []).map(function(h){
+        return {id:h.id, label:h.label || h.id, desc:h.description || ""};
+      });
+    });
+  }
+
+  var WD_QUERY_TAIL = "} OPTIONAL{?item wdt:P31 ?type} OPTIONAL{?item wdt:P136 ?genre}" +
+    " OPTIONAL{?item wdt:P1113 ?eps} OPTIONAL{?item wdt:P577 ?date}" +
+    " OPTIONAL{?item wdt:P580 ?start} OPTIONAL{?item wdt:P345 ?imdb}" +
+    " SERVICE wikibase:label { bd:serviceParam wikibase:language \"en\". } } LIMIT 300";
+
+  // One row comes back per type x genre combination, so rows are folded back per entity. Labels
+  // are asked for in English because the keyword tables above are English.
+  function wdFacts(ids){
+    var q = "SELECT ?item ?typeLabel ?genreLabel ?eps ?date ?start ?imdb WHERE { VALUES ?item {" +
+      ids.map(function(id){ return "wd:" + id; }).join(" ") + WD_QUERY_TAIL;
+    var url = WD_SPARQL + "?format=json&query=" + encodeURIComponent(q);
+    return wdTimed(function(signal){
+      return fetch(url, {signal:signal, headers:{
+        "Accept": "application/sparql-results+json",
+        "Api-User-Agent": WD_UA
+      }}).then(function(r){
+        if (!r.ok) throw new Error("sparql HTTP " + r.status);
+        return r.json();
+      });
+    }).then(function(j){
+      var out = {};
+      ((j.results && j.results.bindings) || []).forEach(function(b){
+        var id = (b.item && b.item.value) ? b.item.value.split("/").pop() : "";
+        if (!id) return;
+        var f = out[id] || (out[id] = {types:[], genres:[], eps:null, year:"", imdb:""});
+        var t = b.typeLabel && b.typeLabel.value;
+        if (t && f.types.indexOf(t) === -1) f.types.push(t);
+        var g = b.genreLabel && b.genreLabel.value;
+        if (g && f.genres.indexOf(g) === -1) f.genres.push(g);
+        if (f.eps == null && b.eps) f.eps = numOrNull(b.eps.value);
+        var when = (b.date && b.date.value) || (b.start && b.start.value) || "";
+        if (!f.year && /^\d{4}/.test(when)) f.year = when.slice(0,4);
+        if (!f.imdb && b.imdb && b.imdb.value) f.imdb = b.imdb.value;
+      });
+      return out;
+    });
+  }
+
   // ---------- rendering ----------
   function searchMatched(all){
     var q = state.search.trim().toLowerCase();
@@ -1329,6 +1488,7 @@
     var overlay = document.getElementById("overlay");
 
     var isEdit = !!entry;
+    var lookupMeta = null;   // set once the user picks a Wikidata candidate
     document.getElementById("modalTitle").textContent = isEdit ? "Edit title" : "Add title";
     document.getElementById("deleteBtn").style.display = isEdit ? "inline-flex" : "none";
 
@@ -1348,6 +1508,91 @@
       document.getElementById("f-watchedDate").value = entry.watchedDate || "";
       document.getElementById("f-notes").value = entry.notes || "";
     }
+
+    // ---- Wikidata lookup, wired to this modal ----
+    var lookupBtn = document.getElementById("lookupBtn");
+    var lookupPanel = document.getElementById("lookupPanel");
+    var candidates = {};
+
+    function panelMsg(text, isErr){
+      lookupPanel.hidden = false;
+      lookupPanel.innerHTML = '<div class="lookup-msg' + (isErr ? " err" : "") + '">' +
+        escapeHtml(text) + '</div>';
+    }
+
+    function renderCandidates(hits){
+      lookupPanel.hidden = false;
+      lookupPanel.innerHTML = hits.map(function(h){
+        var f = candidates[h.id].facts;
+        var bits = [];
+        if (f){
+          var type = mapKeywords(TYPE_KEYWORDS, f.types);
+          if (type) bits.push(type);
+          if (f.year) bits.push(f.year);
+          if (f.eps) bits.push(f.eps + " ep");
+        }
+        return '<button type="button" class="cand" data-wd="' + escapeHtml(h.id) + '">' +
+          '<b>' + escapeHtml(h.label) + '</b>' +
+          (bits.length ? '<span class="hint">' + escapeHtml(bits.join(" \u00B7 ")) + '</span>' : "") +
+          (h.desc ? '<span class="desc">' + escapeHtml(h.desc) + '</span>' : "") +
+          '</button>';
+      }).join("");
+    }
+
+    // A pick normalises the title (that is what choosing a candidate means) but every other field
+    // is only filled when it is still empty — a lookup never overwrites what was typed.
+    function fillFrom(id){
+      var c = candidates[id];
+      if (!c) return;
+      var typeEl = document.getElementById("f-mediaType");
+      var genreEl = document.getElementById("f-genre");
+      var epEl = document.getElementById("f-epTotal");
+      var f = c.facts;
+      var filled = [];
+      if (c.label) document.getElementById("f-title").value = c.label;
+      if (f){
+        var type = mapKeywords(TYPE_KEYWORDS, f.types);
+        if (type && !typeEl.value && hasOption(typeEl, type)){ typeEl.value = type; filled.push("Type"); }
+        var genre = mapKeywords(GENRE_KEYWORDS, f.genres);
+        if (genre && !genreEl.value && hasOption(genreEl, genre)){ genreEl.value = genre; filled.push("Genre"); }
+        if (f.eps && !epEl.value){ epEl.value = f.eps; filled.push("Episodes"); }
+      }
+      lookupMeta = {wikidataId:id, imdbId:(f && f.imdb) || ""};
+      panelMsg(filled.length ? "Filled from Wikidata: " + filled.join(", ")
+        : f ? "Linked to Wikidata \u2014 nothing left to fill."
+            : "Linked to Wikidata \u2014 no details came back for it.");
+    }
+
+    function runLookup(){
+      var q = document.getElementById("f-title").value.trim();
+      if (!q){ panelMsg("Type a title first."); return; }
+      lookupBtn.disabled = true;
+      candidates = {};
+      panelMsg("Searching Wikidata\u2026");
+      wdSearch(q, "ko")
+        .then(function(hits){ return hits.length ? hits : wdSearch(q, "en"); })
+        .then(function(hits){
+          if (!hits.length){ panelMsg("Nothing on Wikidata for \u201C" + q + "\u201D."); return; }
+          hits.forEach(function(h){ candidates[h.id] = {label:h.label, desc:h.desc, facts:null}; });
+          // Losing the facts still leaves a usable list: the titles remain pickable.
+          return wdFacts(hits.map(function(h){ return h.id; }))
+            .catch(function(){ return {}; })
+            .then(function(facts){
+              hits.forEach(function(h){ candidates[h.id].facts = facts[h.id] || null; });
+              renderCandidates(hits);
+            });
+        })
+        .catch(function(err){
+          panelMsg("Wikidata lookup failed (" + ((err && err.message) || "unknown") + ").", true);
+        })
+        .then(function(){ lookupBtn.disabled = false; });
+    }
+
+    lookupBtn.addEventListener("click", runLookup);
+    lookupPanel.addEventListener("click", function(ev){
+      var btn = ev.target.closest("[data-wd]");
+      if (btn) fillFrom(btn.getAttribute("data-wd"));
+    });
 
     function close(){ overlay.remove(); }
     document.getElementById("cancelBtn").addEventListener("click", close);
@@ -1379,6 +1624,12 @@
         notes: document.getElementById("f-notes").value.trim()
       };
       if (!data.title) return;
+      // Join keys, kept so a later lookup or a poster feature need not search again. Unknown
+      // fields ride along untouched through storage, merge and export, so no format bump.
+      if (lookupMeta){
+        data.wikidataId = lookupMeta.wikidataId;
+        if (lookupMeta.imdbId) data.imdbId = lookupMeta.imdbId;
+      }
       var statusValue = document.getElementById("f-status").value;
       if (isEdit){
         Object.assign(entry, data);
