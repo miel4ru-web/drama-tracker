@@ -355,6 +355,29 @@
   .cand .desc{display:block;color:var(--text-muted);font-size:11.5px;margin-top:1px;}
   .ep-inputs{display:flex;align-items:center;gap:6px;}
   .ep-inputs span{color:var(--text-muted);font-size:13px;}
+
+  /* ---- Seasons ---- */
+  /* In the form: a total box, then one checkbox per season. In the row: the same seasons as
+     small pips that toggle in place. */
+  .season-inputs{display:flex;flex-direction:column;gap:8px;}
+  .season-inputs > input{width:110px;}
+  .season-checks{display:flex;flex-wrap:wrap;gap:6px;}
+  .season-checks:empty{display:none;}
+  .scheck{
+    display:inline-flex;align-items:center;gap:5px;font-size:12.5px;font-weight:600;cursor:pointer;
+    border:1px solid var(--border);border-radius:6px;padding:4px 9px;background:var(--surface);color:var(--text-muted);
+  }
+  .scheck.on{border-color:var(--accent);background:var(--accent-soft);color:var(--accent);}
+  .scheck input{width:auto;margin:0;accent-color:var(--accent);}
+  .seasons{display:inline-flex;flex-wrap:wrap;gap:3px;}
+  .spip{
+    font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-size:10.5px;font-weight:700;line-height:1;
+    border:1px solid var(--border-strong);background:var(--surface);color:var(--text-muted);
+    border-radius:5px;padding:4px 5px;cursor:pointer;
+  }
+  .spip:hover{border-color:var(--accent);color:var(--accent);}
+  .spip.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);}
+  .spip.on:hover{color:var(--accent-ink);filter:brightness(1.06);}
   .modal-actions{display:flex;justify-content:space-between;gap:10px;margin-top:18px;}
   .modal-actions .right{display:flex;gap:8px;}
   .backup{display:flex;align-items:center;gap:8px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border);}
@@ -485,6 +508,13 @@
               <span>/</span>
               <input type="number" id="f-epTotal" min="0" step="1" inputmode="numeric" placeholder="total" aria-label="Episodes in total">
             </div>
+          </div>
+        </div>
+        <div class="field">
+          <label for="f-seasonsTotal">Seasons <span style="text-transform:none;font-weight:400;">(tick the ones you've seen)</span></label>
+          <div class="season-inputs">
+            <input type="number" id="f-seasonsTotal" min="0" step="1" inputmode="numeric" placeholder="total" aria-label="Seasons in total">
+            <div class="season-checks" id="f-seasonChecks" role="group" aria-label="Seasons watched"></div>
           </div>
         </div>
         <div class="field-row">
@@ -697,12 +727,36 @@
     return entry;
   }
 
+  // Seasons are ticked one by one, so the watched set is a sorted list of season numbers (not a
+  // count): 1..total, no duplicates, and nothing above the total once one is known. More pips
+  // than SEASONS_MAX would only clutter the row, so the total is capped there as well.
+  var SEASONS_MAX = 100;
+
+  function seasonsTotalOrNull(v){
+    var n = numOrNull(v);
+    return n ? Math.min(n, SEASONS_MAX) : null;
+  }
+  function seasonList(v, total){
+    if (!Array.isArray(v)) return [];
+    var out = [];
+    v.forEach(function(x){
+      var n = numOrNull(x);
+      if (n && (total == null || n <= total) && out.indexOf(n) === -1) out.push(n);
+    });
+    return out.sort(function(a, b){ return a - b; });
+  }
+  function seasonSeen(entry, n){
+    return (entry.seasonsWatched || []).indexOf(n) !== -1;
+  }
+
   function normalizeEntry(entry){
     entry.status = statusOf(entry);
     entry.watched = (entry.status === "done");
     entry.episodesTotal = numOrNull(entry.episodesTotal);
     entry.episodesWatched = numOrNull(entry.episodesWatched);
     entry.year = yearOrNull(entry.year);
+    entry.seasonsTotal = seasonsTotalOrNull(entry.seasonsTotal);
+    entry.seasonsWatched = seasonList(entry.seasonsWatched, entry.seasonsTotal);
     return entry;
   }
 
@@ -1146,14 +1200,14 @@
   }
 
   var WD_QUERY_TAIL = "} OPTIONAL{?item wdt:P31 ?type} OPTIONAL{?item wdt:P136 ?genre}" +
-    " OPTIONAL{?item wdt:P1113 ?eps} OPTIONAL{?item wdt:P577 ?date}" +
+    " OPTIONAL{?item wdt:P1113 ?eps} OPTIONAL{?item wdt:P2437 ?seasons} OPTIONAL{?item wdt:P577 ?date}" +
     " OPTIONAL{?item wdt:P580 ?start} OPTIONAL{?item wdt:P345 ?imdb}" +
     " SERVICE wikibase:label { bd:serviceParam wikibase:language \"en\". } } LIMIT 300";
 
   // One row comes back per type x genre combination, so rows are folded back per entity. Labels
   // are asked for in English because the keyword tables above are English.
   function wdFacts(ids){
-    var q = "SELECT ?item ?typeLabel ?genreLabel ?eps ?date ?start ?imdb WHERE { VALUES ?item {" +
+    var q = "SELECT ?item ?typeLabel ?genreLabel ?eps ?seasons ?date ?start ?imdb WHERE { VALUES ?item {" +
       ids.map(function(id){ return "wd:" + id; }).join(" ") + WD_QUERY_TAIL;
     var url = WD_SPARQL + "?format=json&query=" + encodeURIComponent(q);
     return wdTimed(function(signal){
@@ -1169,12 +1223,13 @@
       ((j.results && j.results.bindings) || []).forEach(function(b){
         var id = (b.item && b.item.value) ? b.item.value.split("/").pop() : "";
         if (!id) return;
-        var f = out[id] || (out[id] = {types:[], genres:[], eps:null, year:"", imdb:""});
+        var f = out[id] || (out[id] = {types:[], genres:[], eps:null, seasons:null, year:"", imdb:""});
         var t = b.typeLabel && b.typeLabel.value;
         if (t && f.types.indexOf(t) === -1) f.types.push(t);
         var g = b.genreLabel && b.genreLabel.value;
         if (g && f.genres.indexOf(g) === -1) f.genres.push(g);
         if (f.eps == null && b.eps) f.eps = numOrNull(b.eps.value);
+        if (f.seasons == null && b.seasons) f.seasons = seasonsTotalOrNull(b.seasons.value);
         var when = (b.date && b.date.value) || (b.start && b.start.value) || "";
         if (!f.year && /^\d{4}/.test(when)) f.year = when.slice(0,4);
         if (!f.imdb && b.imdb && b.imdb.value) f.imdb = b.imdb.value;
@@ -1400,6 +1455,19 @@
     return '<span class="progress"><span class="bar"><i style="width:'+pct+'%"></i></span>'+seen+'/'+total+'</span>';
   }
 
+  // One pip per season; a click toggles it right in the row, no form needed.
+  function seasonsHtml(e){
+    var total = e.seasonsTotal;
+    if (!total) return "";
+    var pips = "";
+    for (var n = 1; n <= total; n++){
+      var on = seasonSeen(e, n);
+      pips += '<button type="button" class="spip' + (on ? " on" : "") + '" data-action="toggle-season" data-season="' + n +
+        '" aria-pressed="' + (on ? "true" : "false") + '" aria-label="Season ' + n + (on ? " watched" : "") + '">S' + n + '</button>';
+    }
+    return '<span class="seasons" role="group" aria-label="Seasons">' + pips + '</span>';
+  }
+
   // The date worth showing depends on where the title is: when it ended, or when it started.
   function dateStub(e){
     var st = statusOf(e);
@@ -1415,6 +1483,8 @@
     if (e.genre) chips.push('<span class="chip">'+escapeHtml(e.genre)+'</span>');
     var prog = progressHtml(e);
     if (prog) chips.push(prog);
+    var seasons = seasonsHtml(e);
+    if (seasons) chips.push(seasons);
     var rankHtml = typeof e.rank === "number"
       ? '<span class="rank">'+starIcon()+e.rank.toFixed(1)+'</span>'
       : '<span class="rank empty">—</span>';
@@ -1478,6 +1548,18 @@
         render();
         sync.save();
       }
+    } else if (action === "toggle-season"){
+      var id4 = rowEl.getAttribute("data-id");
+      var e4 = state.entries.find(function(x){return x.id===id4;});
+      var n = parseInt(actionEl.getAttribute("data-season"), 10);
+      if (e4 && n){
+        var list = (e4.seasonsWatched || []).filter(function(s){ return s !== n; });
+        if (!seasonSeen(e4, n)) list.push(n);
+        e4.seasonsWatched = seasonList(list, e4.seasonsTotal);
+        touch(e4);
+        render();
+        sync.save();
+      }
     } else if (action === "edit"){
       var id2 = rowEl.getAttribute("data-id");
       var e2 = state.entries.find(function(x){return x.id===id2;});
@@ -1524,6 +1606,33 @@
       function(){ return rankValue; },
       function(v){ rankValue = v; });
 
+    // ---- seasons: total box drives the checkbox row; ticks survive a change of total ----
+    var seasonsTotalEl = document.getElementById("f-seasonsTotal");
+    var seasonChecksEl = document.getElementById("f-seasonChecks");
+    var seasonsTicked = (isEdit && entry.seasonsWatched) ? entry.seasonsWatched.slice() : [];
+
+    function readSeasonTicks(){
+      return Array.prototype.map.call(seasonChecksEl.querySelectorAll("input:checked"), function(cb){
+        return parseInt(cb.value, 10);
+      });
+    }
+    function renderSeasonChecks(){
+      if (seasonChecksEl.children.length) seasonsTicked = readSeasonTicks();
+      var total = seasonsTotalOrNull(seasonsTotalEl.value);
+      var html = "";
+      for (var n = 1; total && n <= total; n++){
+        var on = seasonsTicked.indexOf(n) !== -1;
+        html += '<label class="scheck' + (on ? " on" : "") + '"><input type="checkbox" value="' + n + '"' +
+          (on ? " checked" : "") + '>S' + n + '</label>';
+      }
+      seasonChecksEl.innerHTML = html;
+    }
+    seasonsTotalEl.addEventListener("input", renderSeasonChecks);
+    seasonChecksEl.addEventListener("change", function(ev){
+      var lab = ev.target.closest(".scheck");
+      if (lab) lab.classList.toggle("on", ev.target.checked);
+    });
+
     if (isEdit){
       document.getElementById("f-title").value = entry.title || "";
       document.getElementById("f-mediaType").value = entry.mediaType || "";
@@ -1532,10 +1641,12 @@
       document.getElementById("f-status").value = statusOf(entry);
       document.getElementById("f-epWatched").value = entry.episodesWatched == null ? "" : entry.episodesWatched;
       document.getElementById("f-epTotal").value = entry.episodesTotal == null ? "" : entry.episodesTotal;
+      seasonsTotalEl.value = entry.seasonsTotal == null ? "" : entry.seasonsTotal;
       document.getElementById("f-startedDate").value = entry.startedDate || "";
       document.getElementById("f-watchedDate").value = entry.watchedDate || "";
       document.getElementById("f-notes").value = entry.notes || "";
     }
+    renderSeasonChecks();
 
     // ---- Wikidata lookup, wired to this modal ----
     var lookupBtn = document.getElementById("lookupBtn");
@@ -1557,6 +1668,7 @@
           var type = mapKeywords(TYPE_KEYWORDS, f.types);
           if (type) bits.push(type);
           if (f.year) bits.push(f.year);
+          if (f.seasons) bits.push(f.seasons + (f.seasons === 1 ? " season" : " seasons"));
           if (f.eps) bits.push(f.eps + " ep");
         }
         return '<button type="button" class="cand" data-wd="' + escapeHtml(h.id) + '">' +
@@ -1585,6 +1697,7 @@
         var genre = mapKeywords(GENRE_KEYWORDS, f.genres);
         if (genre && !genreEl.value && hasOption(genreEl, genre)){ genreEl.value = genre; filled.push("Genre"); }
         if (f.eps && !epEl.value){ epEl.value = f.eps; filled.push("Episodes"); }
+        if (f.seasons && !seasonsTotalEl.value){ seasonsTotalEl.value = f.seasons; renderSeasonChecks(); filled.push("Seasons"); }
         if (f.year && !yearEl.value){ yearEl.value = f.year; filled.push("Year"); }
       }
       lookupMeta = {wikidataId:id, imdbId:(f && f.imdb) || ""};
@@ -1651,10 +1764,12 @@
         watchedDate: document.getElementById("f-watchedDate").value,
         episodesWatched: numOrNull(document.getElementById("f-epWatched").value),
         episodesTotal: numOrNull(document.getElementById("f-epTotal").value),
+        seasonsTotal: seasonsTotalOrNull(seasonsTotalEl.value),
         rank: rankValue,
         notes: document.getElementById("f-notes").value.trim()
       };
       if (!data.title) return;
+      data.seasonsWatched = seasonList(readSeasonTicks(), data.seasonsTotal);
       // Join keys, kept so a later lookup or a poster feature need not search again. Unknown
       // fields ride along untouched through storage, merge and export, so no format bump.
       if (lookupMeta){
